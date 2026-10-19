@@ -24,4 +24,5 @@ def make(t, seq, flags=0, payload=b''):
 #splitting packets into type, flags, seq, timestamp, payload
 def parse(buf):
     types,flags,seq,ts = header.unpack_from(buf)
-    return types,flags,seq,ts,buf[header.size:] # !ts is NOT Taylor Swift! #
+    return types,flags,seq,ts,buf[header.size:] 
+
