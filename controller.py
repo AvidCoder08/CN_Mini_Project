@@ -94,6 +94,7 @@ class Loss_recovery_controller(app_manager.RyuApp):
 
         next_path = 'alternate' if self.active == 'primary' else 'primary' # changes the path
         self.active = next_path
+        self.logger.info('REROUTE -> %s', self.active)
         self.hold_down = now
         self.loss_count = 0
         

@@ -22,7 +22,10 @@ def loss_report():
         loss = 100.0                      
     else:
         total = new_gaps + originals
-        loss = 100.0 * new_gaps / total if total else 0.0
+        if total == 0:          # only retransmissions arrived: no new information
+            pkts = 0
+            return
+        loss = 100.0 * new_gaps / total
     new_gaps = originals = pkts = 0
     print(f"Window loss: {loss:.2f}%")
     try:
