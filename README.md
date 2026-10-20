@@ -18,13 +18,8 @@ controller, and the controller reroutes traffic when loss remains high.
 
 ## Topology
 
-```text
-                 s2
-                /  \
-h1 --- s1      /    s4 --- h2
-       \      /     /
-        \--- s3 ---/
-```
+<img width="1061" height="632" alt="Pasted image 20261019084435" src="https://github.com/user-attachments/assets/fccfb8d7-64cc-4bd0-b40e-cc209e977944" />
+
 
 The links are represented by the following two routes:
 
