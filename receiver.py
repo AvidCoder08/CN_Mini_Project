@@ -36,7 +36,6 @@ originals = 0
 pkts = 0
 
 while True:
-    last_report = time.monotonic()
 
     try:
         buff, peer = socks.recvfrom(2048)
@@ -77,6 +76,8 @@ while True:
             for sequence in range((window_index*window_size),window_size+(window_index*window_size)):
                     
                     if sequence not in window.keys() or (window[sequence]["status"] != ACKED and (now - window[sequence]["time"])>0.2):
+                        if sequence not in window.keys():
+                            new_gaps += 1
                         nack_pkt = make(NACK, sequence, flags=0, payload=b'')
                         socks.sendto(nack_pkt,peer)
                         window[sequence] = {"payload":'',"status":NACKED,"time":now,"flags":0}
@@ -88,4 +89,4 @@ while True:
         last_report = tick
         
 
-print(f"Received all packets, total packets received: {len(window.keys())}, retransmissions: {retrans}")
+print(f"Received all packets, total packets received: {len(window.keys())}, retransmissions: {retrans}, total loss: {new_gaps} packets, loss percentage: {100.0 * new_gaps / send_total:.2f}%")
