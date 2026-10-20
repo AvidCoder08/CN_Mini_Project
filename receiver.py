@@ -11,27 +11,29 @@ peer = None
 retrans = 0
 
 ryu_socket = socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM)
-ryu_ip = "localhost"
-ryu_port = 6633
 SOCK_PATH = '/tmp/ryu_loss.sock'
 
 def loss_report():
-    loss = 0
-    for seq in window:
-        if window[seq]["status"] == NACKED and window[seq]["flags"] == F_RETX:
-            loss += 1
-    if len(window) > 0:
-        loss_percentage = (loss / len(window)) * 100
+    global new_gaps, originals, pkts
+    if peer is None:
+        return
+    if pkts == 0:
+        loss = 100.0                      
     else:
-        loss_percentage = 0
-    print(f"Packet loss: {loss}, Percentage: {loss_percentage:.2f}%")
+        total = new_gaps + originals
+        loss = 100.0 * new_gaps / total if total else 0.0
+    new_gaps = originals = pkts = 0
+    print(f"Window loss: {loss:.2f}%")
     try:
-        ryu_socket.sendto(f"{loss_percentage:.2f}".encode(), SOCK_PATH)
+        ryu_socket.sendto(f"{loss:.2f}".encode(), SOCK_PATH)
     except Exception as e:
         print(f"Error occurred: {e}")
 
 
 last_report = time.monotonic()
+new_gaps = 0
+originals = 0
+pkts = 0
 
 while True:
     last_report = time.monotonic()
@@ -46,6 +48,9 @@ while True:
             send_total = seq
             break
         if types == DATA:
+            pkts += 1
+            if flags != F_RETX:
+                originals += 1
             window[seq] = {"payload":temp,"status":RCVD,"time":time.time(),"flags":flags}
             ack_pkt = make(ACK, seq, flags=0, payload=b'')
             socks.sendto(ack_pkt,peer)
@@ -54,6 +59,7 @@ while True:
 
             for sequence in range((window_index*window_size),seq):
                 if sequence not in window.keys():
+                    new_gaps += 1
                     nack_pkt = make(NACK, sequence, flags=0, payload=b'')
                     socks.sendto(nack_pkt,peer)
                     window[sequence] = {"payload":'',"status":NACKED,"time":time.time(),"flags":0}

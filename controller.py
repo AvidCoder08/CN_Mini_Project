@@ -1,7 +1,7 @@
 #This is the ryu app, it shows how 
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-from ryu.controller.handler import CONFIG_DISPATCHER, set_ev_cls, MAIN_DISPATCHER
+from ryu.controller.handler import CONFIG_DISPATCHER, set_ev_cls, MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.ofproto import ofproto_v1_3
 import os
 import time
@@ -80,7 +80,15 @@ class Loss_recovery_controller(app_manager.RyuApp):
             self._add_flow(dp, H2_IP, PATHS[name][1])
         elif dp.id == 4:
             self._add_flow(dp, H1_IP, PATHS[name][4])
-            
+
+    @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
+    def on_state(self, ev):
+        if ev.state == DEAD_DISPATCHER:
+            self.dps.pop(ev.datapath.id, None)
+            self.active = 'primary'
+            self.loss_count = 0
+            self.hold_down = 0.0
+
     def reroute(self):
         now = time.time()
         if now - self.hold_down < HOLD_DOWN_SEC:
@@ -96,6 +104,8 @@ class Loss_recovery_controller(app_manager.RyuApp):
             self._install_path(dp, self.active)
 
     def send_loss_report(self, loss_percentage):
+        if time.time() - self.hold_down < HOLD_DOWN_SEC:
+            return
         self.logger.info('Received loss report: %.2f%%', loss_percentage)
         if loss_percentage >= LOSS_THRESHOLD:  
             self.loss_count += 1
@@ -103,5 +113,7 @@ class Loss_recovery_controller(app_manager.RyuApp):
             if self.loss_count >= CONSECUTIVE_WINDOWS:
                 self.logger.info('route recalculation')
                 self.reroute()
+        else:
+            self.loss_count = 0
 
     
