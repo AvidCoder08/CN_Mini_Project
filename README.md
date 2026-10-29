@@ -39,7 +39,6 @@ The hosts use `10.0.0.1` and `10.0.0.2`. The Ryu controller listens on
 | [`sender.py`](./sender.py) | Sends windowed UDP data and retransmits missing packets. |
 | [`receiver.py`](./receiver.py) | Receives data, sends ACK/NACK responses, and reports loss. |
 | [`common.py`](./common.py) | Packet header definitions, message types, and serialization helpers. |
-| [`h1.log`](./h1.log), [`h2.log`](./h2.log) | Example sender and receiver output. |
 
 ## Requirements
 
@@ -77,6 +76,7 @@ The controller must be running before the Mininet switches connect.
 In a second terminal:
 
 ```bash
+sudo service openvswitch-switch start
 sudo python3 topo.py
 ```
 
@@ -98,6 +98,13 @@ Start the sender on `h1`:
 ```text
 mininet> h1 python3 sender.py --dst 10.0.0.2 --count 2000 > h1.log 2>&1 &
 ```
+
+To simulate a loss:
+```text
+mininet> h1 tc qdisc add dev h1-eth0 root netem loss 20%
+```
+
+Then run the sender python file once more.
 
 The sender defaults to 2,000 packets and a 500-byte payload. It sends packets
 in windows of 10, waits for ACKs, retransmits packets requested with NACKs or
