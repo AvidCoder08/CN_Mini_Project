@@ -17,8 +17,33 @@ controller, and the controller reroutes traffic when loss remains high.
 - Hold-down logic to avoid repeatedly changing paths during a loss event.
 
 ## Topology
+```mermaid
+graph TD
+    H1["Host 1 (Sender)<br/>10.0.0.1"]
+    H2["Host 2 (Receiver)<br/>10.0.0.2"]
+    S1["s1"]
+    S2["s2 (primary)"]
+    S3["s3 (alternate)"]
+    S4["s4"]
+    MS["Management Switch"]
+    C["Ryu Controller"]
 
-<img width="1061" height="632" alt="Pasted image 20261019084435" src="https://github.com/user-attachments/assets/fccfb8d7-64cc-4bd0-b40e-cc209e977944" />
+    %% Data plane (solid)
+    H1 --- S1
+    S1 --- S2
+    S1 --- S3
+    S2 --- S4
+    S3 --- S4
+    S4 --- H2
+
+    %% Control plane (dashed)
+    MS -.- S1
+    MS -.- S2
+    MS -.- S3
+    MS -.- S4
+    C --- MS
+    C -.- H2
+```
 
 
 The links are represented by the following two routes:
