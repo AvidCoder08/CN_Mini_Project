@@ -1,206 +1,161 @@
-# Loss-Aware UDP Routing in Mininet
+# Loss-Aware UDP Packet Loss Detection and Dynamic SDN Recovery (Merged D1 + D2)
 
-This project is a small software-defined networking experiment that demonstrates
-loss-aware routing with Mininet, Open vSwitch, and a Ryu OpenFlow 1.3 controller.
-Two Mininet hosts exchange UDP data through a four-switch topology with primary
-and alternate paths. The receiver reports observed packet loss to the
-controller, and the controller reroutes traffic when loss remains high.
+This project implements a complete **UDP Packet Loss Detection and Recovery** application integrated with a **Ryu OpenFlow 1.3 SDN Controller** and a **Mininet** diamond network topology. It combines all architectural components, sliding/batch window tracking, and line-by-line documented implementation from **Deliverable 1 (`CN_Mini`)** with the session handshakes, port/link-failure detection, static vs. dynamic routing comparison, and automated recovery-time analyzer from **Deliverable 2 (`CN-Deliverable-2`)**.
 
-## Features
+## Project Objectives Covered
 
-- Custom UDP packet format with sequence numbers, timestamps, and packet types.
-- Fixed-size sliding windows of 10 packets.
-- ACK/NACK-based recovery for missing packets.
-- Timeout-based retransmission at the sender.
-- Periodic receiver loss reports over a Unix datagram socket.
-- Controller-triggered switching between two OpenFlow paths.
-- Hold-down logic to avoid repeatedly changing paths during a loss event.
+- **Implement UDP sequence tracking**: Every UDP packet carries a 14-byte network-order binary header (`!BQI?`) containing the packet type (`START`/`INI`, `START_ACK`/`INI_ACK`, `DATA`, `ACK`, `NACK`, `FIN`, `FIN_ACK`), a 64-bit random session ID, a 32-bit sequence number, and a retransmission flag (`retry` / `F_RETX`).
+- **Detect missing packets**: The receiver tracks the sequence frontier (`frontier`), delivered packet set (`seen`), first-attempt arrivals (`originals`), and cumulative missing packet gaps (`gap_set`). It detects both out-of-order sequence gaps (`range(frontier, seq)`) and tail-of-window stalls (`200 ms` proactive window sweep).
+- **Implement acknowledgments and retransmission**: The receiver immediately sends `ACK` packets for valid `DATA` datagrams and `NACK` packets for missing sequence numbers. The sender transmits in 10-packet windows (`WINDOW_SIZE = 10`), performing fast retransmission upon receiving a `NACK` and timeout-based retransmission (`250 ms` RTO) if an `ACK` does not arrive in time.
+- **Monitor network paths**: The receiver computes first-attempt packet loss every `0.5 s` (including `100%` stall detection when traffic halts completely) and reports it over a Unix domain datagram socket (`/tmp/ryu_loss.sock`) to the Ryu controller. Simultaneously, the Ryu controller monitors OpenFlow switch and port status events (`EventOFPPortStatus`, `EventOFPPortDescStatsReply`, `EventOFPStateChange`).
+- **Create alternate paths in Mininet**: `topo.py` builds a 2-host (`h1`, `h2`), 4-switch (`s1`, `s2`, `s3`, `s4`) diamond topology with two disjoint transit branches:
+  - **Primary Path**: `h1 -> s1 -> s2 -> s4 -> h2`
+  - **Alternate Path**: `h1 -> s1 -> s3 -> s4 -> h2`
+- **Trigger dynamic rerouting**: In dynamic mode (`CN_MODE=dynamic`), the Ryu controller automatically switches bidirectional OpenFlow rules on `s1` and `s4` to the alternate path when either:
+  1. Two consecutive high-loss windows (`loss >= 15.0%`) are reported by the receiver (`reason="sustained_loss"`), with a `5.0 s` hold-down timer to prevent route flapping, or
+  2. An active link or switch on the current path goes down (`reason="link_or_switch_down"`).
+- **Measure recovery time & compare packet loss before and after recovery**: `analyze.py` parses the timestamped JSONL logs from the sender, receiver, controller, and fault injector to measure `Fault to reroute command`, `Fault to ACK progress`, `Reroute to ACK recovery`, and first-attempt packet loss across `clean`, `pre_fault`, `impaired` (before recovery), and `post_reroute` (after recovery) phases.
 
-## Topology
+## Network Topology
+
 ```mermaid
 graph TD
     H1["Host 1 (Sender)<br/>10.0.0.1"]
     H2["Host 2 (Receiver)<br/>10.0.0.2"]
-    S1["s1"]
-    S2["s2 (primary)"]
-    S3["s3 (alternate)"]
-    S4["s4"]
-    MS["Management Switch"]
-    C["Ryu Controller"]
+    S1["s1 (Ingress Switch)"]
+    S2["s2 (Primary Path)"]
+    S3["s3 (Alternate Path)"]
+    S4["s4 (Egress Switch)"]
+    C["Ryu OpenFlow 1.3 Controller<br/>127.0.0.1:6653"]
 
     %% Data plane (solid)
-    H1 --- S1
-    S1 --- S2
-    S1 --- S3
-    S2 --- S4
-    S3 --- S4
-    S4 --- H2
+    H1 ---|"port 1"| S1
+    S1 ---|"s1:p2 - s2:p1"| S2
+    S1 ---|"s1:p3 - s3:p1"| S3
+    S2 ---|"s2:p2 - s4:p1"| S4
+    S3 ---|"s3:p2 - s4:p2"| S4
+    S4 ---|"port 3"| H2
 
-    %% Control plane (dashed)
-    MS -.- S1
-    MS -.- S2
-    MS -.- S3
-    MS -.- S4
-    C --- MS
-    C -.- H2
+    %% Control & telemetry plane (dashed)
+    C -.-|"OpenFlow 1.3"| S1
+    C -.-|"OpenFlow 1.3"| S2
+    C -.-|"OpenFlow 1.3"| S3
+    C -.-|"OpenFlow 1.3"| S4
+    H2 -.-|"/tmp/ryu_loss.sock"| C
 ```
 
+## Repository Files
 
-The links are represented by the following two routes:
-
-- **Primary:** `h1 -> s1 -> s2 -> s4 -> h2`
-- **Alternate:** `h1 -> s1 -> s3 -> s4 -> h2`
-
-The hosts use `10.0.0.1` and `10.0.0.2`. The Ryu controller listens on
-`127.0.0.1:6653`, and the receiver sends loss reports to
-`/tmp/ryu_loss.sock`.
-
-## Repository layout
-
-| File | Description |
+| File | Purpose |
 | --- | --- |
-| [`topo.py`](./topo.py) | Builds the Mininet topology and starts the CLI. |
-| [`controller.py`](./controller.py) | Ryu controller that installs flows and switches paths. |
-| [`sender.py`](./sender.py) | Sends windowed UDP data and retransmits missing packets. |
-| [`receiver.py`](./receiver.py) | Receives data, sends ACK/NACK responses, and reports loss. |
-| [`common.py`](./common.py) | Packet header definitions, message types, and serialization helpers. |
+| `common.py` | Binary header format (`!BQI?`), packet/window constants (`START`/`INI`, `DATA`, `ACK`, `NACK`, `FIN`, `F_RETX`), `packet()`/`make()`/`parse()` helpers, and JSONL `log()` utility. |
+| `topo.py` | Constructs the 2-host, 4-switch diamond Mininet topology with primary (`s2`) and alternate (`s3`) paths. |
+| `controller.py` | Ryu OpenFlow 1.3 controller supporting static baseline (`CN_MODE=static`) and dynamic failover (`CN_MODE=dynamic`) on sustained packet loss or link/switch failure. |
+| `sender.py` | Windowed, rate-paced UDP sender with `START`/`FIN` handshakes, `NACK` fast retransmission, and timeout recovery. |
+| `receiver.py` | UDP receiver with sequence tracking, out-of-order and window-tail gap detection, `ACK`/`NACK` generation, and `0.5 s` loss reporting to Ryu. |
+| `analyze.py` | Post-run log analyzer that computes before/after recovery packet loss, unique delivery, retransmissions, and recovery latency. |
 
-## Requirements
+## Quick Local Verification (No Mininet Required)
 
-Run the experiment on a Linux system with:
-
-- Python 3
-- Mininet
-- Open vSwitch
-- Ryu
-
-Mininet and Open vSwitch normally require root privileges. Install Ryu in the
-Python environment used to run the controller:
+You can test the UDP protocol, sequence tracking, NACK/timeout recovery, and log analysis directly on localhost (`127.0.0.1`):
 
 ```bash
-python3 -m pip install ryu
+python3 receiver.py --local --deadline 15 > receiver.log 2>&1 &
+python3 sender.py --dst 127.0.0.1 --count 50 --rate 200 --deadline 10 > sender.log 2>&1
+python3 analyze.py sender.log receiver.log
 ```
 
-Use the distribution packages or Mininet installation instructions appropriate
-for your Linux distribution to install Mininet and Open vSwitch.
+Both `sender.log` and `receiver.log` will end with `"complete": true` and `Delivery: 50/50`.
 
-## Running the experiment
+## Running the Full Mininet + SDN Experiments
 
-Open three terminals from the project directory.
-
-### 1. Start the Ryu controller
+### 1. Start the Ryu Controller (Terminal 1)
 
 ```bash
-ryu-manager controller.py
+CN_MODE=dynamic ryu-manager --ofp-tcp-listen-port 6653 controller.py > controller.log 2>&1
 ```
 
-The controller must be running before the Mininet switches connect.
-
-### 2. Start Mininet
-
-In a second terminal:
+### 2. Start Open vSwitch and Mininet (Terminal 2)
 
 ```bash
 sudo service openvswitch-switch start
 sudo python3 topo.py
 ```
 
-Wait for the Mininet CLI to appear. The topology starts two hosts, four
-OpenFlow 1.3 switches, and a remote controller connection.
-
-### 3. Start the receiver
-
-At the Mininet CLI, start the receiver on `h2`:
+Verify connectivity at the `mininet>` prompt:
 
 ```text
-mininet> h2 python3 receiver.py > h2.log 2>&1 &
+links
+h1 ping -c 1 10.0.0.2
 ```
 
-### 4. Start the sender
+### 3. Trial A — Clean Baseline Run
 
-Start the sender on `h1`:
+At the `mininet>` prompt:
 
 ```text
-mininet> h1 python3 sender.py --dst 10.0.0.2 --count 2000 > h1.log 2>&1 &
+sh rm -f fault.log && touch fault.log
+h2 python3 receiver.py --deadline 55 > receiver.log 2>&1 &
+h1 python3 sender.py --count 2000 --rate 100 --deadline 45 > sender.log 2>&1
+sh tail -n 1 sender.log receiver.log
+sh python3 analyze.py sender.log receiver.log controller.log fault.log
 ```
 
-To simulate a loss:
-```text
-mininet> h1 tc qdisc add dev h1-eth0 root netem loss 20%
-```
+### 4. Trial B — Dynamic Rerouting on Primary Link Failure
 
-Then run the sender python file once more.
-
-The sender defaults to 2,000 packets and a 500-byte payload. It sends packets
-in windows of 10, waits for ACKs, retransmits packets requested with NACKs or
-detected by a timeout, and finally sends several `FIN` packets.
-
-To stop Mininet after the run:
+Capture initial flows, start the transfer in the background, and bring down the primary link (`s2-eth2`) after 5 seconds:
 
 ```text
-mininet> exit
+sh ovs-ofctl -O OpenFlow13 dump-flows s1 > s1-before.log
+sh ovs-ofctl -O OpenFlow13 dump-flows s4 > s4-before.log
+h2 python3 receiver.py --deadline 55 > receiver.log 2>&1 &
+h1 python3 sender.py --count 2000 --rate 100 --deadline 45 > sender.log 2>&1 &
 ```
 
-Then stop the Ryu controller with `Ctrl+C`.
-
-## Observing loss and rerouting
-
-The receiver prints per-window loss reports and sends the percentage to the
-controller over `/tmp/ryu_loss.sock`. The controller considers a report of
-15% or more to be high loss. After two consecutive high-loss windows, it
-switches between the primary and alternate paths. A five-second hold-down
-period prevents route flapping.
-
-The controller logs path changes and loss reports in the terminal where
-`ryu-manager` is running. The sender and receiver logs can be inspected from
-the Mininet host namespaces:
+Wait ~5 seconds, then inject the link failure:
 
 ```text
-mininet> h1 tail -f h1.log
-mininet> h2 tail -f h2.log
+sh python3 -c "from common import log; log('fault')" > fault.log && ip link set dev s2-eth2 down
 ```
 
-To introduce packet loss on a Mininet interface, use Linux traffic control
-from the Mininet CLI. For example:
+After the transfer completes, inspect the reroute event, updated OpenFlow rules, and recovery metrics:
 
 ```text
-mininet> h1 tc qdisc add dev h1-eth0 root netem loss 20%
+sh grep reroute controller.log
+sh ovs-ofctl -O OpenFlow13 dump-flows s1 > s1-after.log
+sh ovs-ofctl -O OpenFlow13 dump-flows s4 > s4-after.log
+sh python3 analyze.py sender.log receiver.log controller.log fault.log
+sh ip link set dev s2-eth2 up
 ```
 
-Remove the impairment when finished:
+### 5. Trial C — Dynamic Rerouting on Sustained Packet Loss (40% Netem Loss)
+
+Start a fresh transfer on the primary path, wait ~5 seconds, and inject 40% packet loss on `s2-eth2`:
 
 ```text
-mininet> h1 tc qdisc del dev h1-eth0 root
+h2 python3 receiver.py --deadline 55 > receiver.log 2>&1 &
+h1 python3 sender.py --count 2000 --rate 100 --deadline 45 > sender.log 2>&1 &
 ```
 
-The exact interface to impair depends on where loss is being simulated. Use
-`net` or `links` in the Mininet CLI to inspect the topology.
-
-## Protocol overview
-
-Each packet starts with a 14-byte network-order header:
+After ~5 seconds:
 
 ```text
-!BBId
+sh python3 -c "from common import log; log('fault')" > fault.log && tc qdisc replace dev s2-eth2 root netem loss 40%
 ```
 
-It contains:
+Once the run finishes, analyze the before-recovery (`impaired`) vs. after-recovery (`post_reroute`) packet loss and clean up the netem rule:
 
-1. Packet type (`INI`, `DATA`, `ACK`, `NACK`, `FIN`, or `INI_ACK`)
-2. Flags (`F_RETX` marks a retransmission)
-3. Sequence number
-4. A sender timestamp
+```text
+sh python3 analyze.py sender.log receiver.log controller.log fault.log
+sh tc qdisc del dev s2-eth2 root
+```
 
-The receiver acknowledges data packets immediately. Missing sequence numbers
-are reported with NACKs, and the sender retransmits the corresponding payload.
-The receiver tracks original packets and gaps to calculate the loss percentage
-reported to the controller.
+### 6. Trial D — Static Routing Baseline Comparison
 
-## Notes
+Restart the controller with `CN_MODE=static`:
 
-- Run the sender and receiver inside Mininet hosts, not from the root shell,
-  so the traffic uses the emulated topology.
-- The receiver must be started before the sender.
-- The Unix socket path is fixed at `/tmp/ryu_loss.sock`; remove a stale socket
-  only if the controller cannot bind it after an unclean shutdown.
-- Generated `.log`, `.pyc`, and `__pycache__` files are ignored by Git.
+```bash
+CN_MODE=static ryu-manager --ofp-tcp-listen-port 6653 controller.py > controller.log 2>&1
+```
+
+Repeat Trials B and C to compare static routing (where traffic remains pinned to the impaired primary path) against dynamic SDN rerouting.
